@@ -1,0 +1,1 @@
+Trigger baseline decompile workflow for the exact working v0.5 APK.
