@@ -1,0 +1,101 @@
+name: Build installable Schetchiki v0.9
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Verify exact baseline
+        run: python scripts/verify_baseline.py
+
+      - name: Locate Android build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          BT=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)
+          test -x "$BT/zipalign"
+          test -x "$BT/apksigner"
+          echo "BT=$BT" >> "$GITHUB_ENV"
+          "$BT/apksigner" --version
+          "$BT/zipalign" -h >/dev/null 2>&1 || true
+
+      - name: Download apktool 3.0.3
+        run: |
+          curl -L --fail -o apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v3.0.3/apktool_3.0.3.jar
+          echo "dbf930b076c6b9be08d57c449cacefc3bdd6b71ebd59b3066fc0e1f5b14f9423  apktool.jar" | sha256sum -c -
+
+      - name: Decompile exact working v0.5
+        run: java -jar apktool.jar d -f baseline/Schetchiki-v0.5-FINAL.apk -o work
+
+      - name: Apply only history editing patch
+        run: python scripts/patch_history_edit.py work
+
+      - name: Set real release version 0.9 / code 9
+        run: python scripts/set_version.py work 9 0.9
+
+      - name: Build unsigned APK
+        run: java -jar apktool.jar b work -o Schetchiki-v0.9-unsigned.apk
+
+      - name: Zipalign APK
+        run: |
+          "$BT/zipalign" -f -p 4 Schetchiki-v0.9-unsigned.apk Schetchiki-v0.9-aligned.apk
+          "$BT/zipalign" -c -v 4 Schetchiki-v0.9-aligned.apk
+
+      - name: Generate permanent release keystore
+        run: |
+          keytool -genkeypair -v \
+            -keystore Schetchiki-release-keystore.p12 \
+            -storetype PKCS12 \
+            -storepass 'Schetchiki_2026_Permanent_Key' \
+            -keypass 'Schetchiki_2026_Permanent_Key' \
+            -alias schetchiki-release \
+            -keyalg RSA -keysize 4096 -sigalg SHA256withRSA \
+            -validity 10000 \
+            -dname 'CN=Schetchiki Release, OU=Android, O=Schetchiki, L=Alanya, ST=Antalya, C=TR'
+
+      - name: Sign with Android APK Signature Scheme v2/v3
+        run: |
+          cp Schetchiki-v0.9-aligned.apk Schetchiki-v0.9-HISTORY-EDIT.apk
+          "$BT/apksigner" sign \
+            --ks Schetchiki-release-keystore.p12 \
+            --ks-type PKCS12 \
+            --ks-key-alias schetchiki-release \
+            --ks-pass pass:Schetchiki_2026_Permanent_Key \
+            --key-pass pass:Schetchiki_2026_Permanent_Key \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            Schetchiki-v0.9-HISTORY-EDIT.apk
+
+      - name: Verify installable APK
+        run: |
+          "$BT/apksigner" verify --verbose --print-certs Schetchiki-v0.9-HISTORY-EDIT.apk | tee signing-verification.txt
+          "$BT/zipalign" -c -v 4 Schetchiki-v0.9-HISTORY-EDIT.apk
+          unzip -t Schetchiki-v0.9-HISTORY-EDIT.apk
+          sha256sum Schetchiki-v0.9-HISTORY-EDIT.apk | tee Schetchiki-v0.9-HISTORY-EDIT.sha256
+          keytool -list -v -keystore Schetchiki-release-keystore.p12 -storetype PKCS12 -storepass 'Schetchiki_2026_Permanent_Key' -alias schetchiki-release > keystore-info.txt
+
+      - name: Upload final APK and permanent signing key
+        uses: actions/upload-artifact@v4
+        with:
+          name: Schetchiki-v0.9-INSTALLABLE
+          retention-days: 90
+          path: |
+            Schetchiki-v0.9-HISTORY-EDIT.apk
+            Schetchiki-v0.9-HISTORY-EDIT.sha256
+            signing-verification.txt
+            Schetchiki-release-keystore.p12
+            keystore-info.txt
