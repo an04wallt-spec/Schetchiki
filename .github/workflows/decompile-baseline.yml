@@ -1,0 +1,29 @@
+name: Decompile baseline APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  decompile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Verify baseline
+        run: python scripts/verify_baseline.py
+      - name: Download apktool 3.0.3
+        run: |
+          curl -L --fail -o apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v3.0.3/apktool_3.0.3.jar
+          echo "dbf930b076c6b9be08d57c449cacefc3bdd6b71ebd59b3066fc0e1f5b14f9423  apktool.jar" | sha256sum -c -
+      - name: Decompile exact v0.5
+        run: java -jar apktool.jar d -f baseline/Schetchiki-v0.5-FINAL.apk -o decompiled-v0.5
+      - uses: actions/upload-artifact@v4
+        with:
+          name: decompiled-v0.5
+          path: decompiled-v0.5
