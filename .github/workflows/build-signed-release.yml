@@ -1,0 +1,96 @@
+name: Build signed Schetchiki release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_name:
+        description: Version name, e.g. 0.10
+        required: true
+        default: '0.9'
+      version_code:
+        description: Android versionCode (must increase)
+        required: true
+        default: '9'
+      suffix:
+        description: APK suffix
+        required: true
+        default: 'HISTORY-EDIT'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Verify exact baseline
+        run: python scripts/verify_baseline.py
+      - name: Download apktool 3.0.3
+        run: |
+          curl -L --fail -o apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v3.0.3/apktool_3.0.3.jar
+          echo "dbf930b076c6b9be08d57c449cacefc3bdd6b71ebd59b3066fc0e1f5b14f9423  apktool.jar" | sha256sum -c -
+      - name: Decompile baseline
+        run: java -jar apktool.jar d -f baseline/Schetchiki-v0.5-FINAL.apk -o work
+      - name: Apply history editing patch
+        run: python scripts/patch_history_edit.py work
+      - name: Set release version
+        run: python scripts/set_version.py work "${{ inputs.version_code }}" "${{ inputs.version_name }}"
+      - name: Rebuild
+        run: java -jar apktool.jar b work -o rebuilt.apk
+      - name: Create release payload from exact baseline
+        run: |
+          python - <<'PY'
+          import zipfile, pathlib
+          base=pathlib.Path('baseline/Schetchiki-v0.5-FINAL.apk')
+          rebuilt=pathlib.Path('rebuilt.apk')
+          unsigned=pathlib.Path('Schetchiki-release-unsigned.apk')
+          with zipfile.ZipFile(rebuilt) as z:
+              replacement={n:z.read(n) for n in ('classes.dex','AndroidManifest.xml')}
+          with zipfile.ZipFile(base) as zin, zipfile.ZipFile(unsigned,'w') as zout:
+              for info in zin.infolist():
+                  n=info.filename
+                  if n in replacement or n.startswith('META-INF/'):
+                      continue
+                  data=zin.read(n)
+                  ni=zipfile.ZipInfo(n, info.date_time)
+                  ni.compress_type=info.compress_type
+                  ni.comment=info.comment
+                  ni.extra=info.extra
+                  ni.internal_attr=info.internal_attr
+                  ni.external_attr=info.external_attr
+                  ni.create_system=info.create_system
+                  ni.flag_bits=info.flag_bits
+                  zout.writestr(ni,data)
+              for n,data in replacement.items():
+                  ni=zipfile.ZipInfo(n)
+                  ni.compress_type=zipfile.ZIP_DEFLATED
+                  zout.writestr(ni,data)
+          PY
+      - name: Restore permanent signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.SCHETCHIKI_KEYSTORE_B64 }}
+        run: |
+          test -n "$KEYSTORE_B64"
+          printf '%s' "$KEYSTORE_B64" | base64 -d > Schetchiki-release-keystore.p12
+      - name: Sign release with permanent key
+        env:
+          STOREPASS: ${{ secrets.SCHETCHIKI_KEYSTORE_PASSWORD }}
+        run: |
+          OUT="Schetchiki-v${{ inputs.version_name }}-${{ inputs.suffix }}.apk"
+          cp Schetchiki-release-unsigned.apk "$OUT"
+          jarsigner -keystore Schetchiki-release-keystore.p12 -storetype PKCS12 \
+            -storepass "$STOREPASS" -keypass "$STOREPASS" \
+            -sigalg SHA256withRSA -digestalg SHA-256 \
+            "$OUT" schetchiki-release
+          jarsigner -verify -verbose -certs "$OUT"
+          sha256sum "$OUT"
+          echo "APK_NAME=$OUT" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APK_NAME }}
+          path: ${{ env.APK_NAME }}
